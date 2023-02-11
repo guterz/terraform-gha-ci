@@ -1,0 +1,81 @@
+name: Terraform - CI
+'on': push
+env:
+  TF_VERSION: 1.3.8
+  AWS_DEFAULT_REGION: us-west-2
+  AWS_ACCESS_KEY_ID: "${{ secrets.AWS_ACCESS_KEY_ID }}"
+  AWS_SECRET_ACCESS_KEY: "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+  PREV_SHA: "${{ github.event.before }}"
+  SHA: "${{ github.sha }}"
+  GIT_SSH_COMMAND: "echo '${{ secrets.SSH_KEY }}' > id_rsa && ssh-keyscan github.com > known_hosts && chmod 600 id_rsa known_hosts && ssh -i ./id_rsa -o UserKnownHostsFile=./known_hosts"
+
+jobs:
+  check_changes:
+    name: check_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    - name: Set branch name
+      uses: nelonoel/branch-name@v1.0.1
+    - name: check_changes_account_layer1
+      id: check_changes_account_layer1
+      run: |
+        . ./bin/check_changes.sh account layer1
+        echo "$CHANGED"
+        echo "ACCOUNT_LAYER1=$CHANGED" >> $GITHUB_OUTPUT
+      shell: bash
+    - name: check_changes_account_layer2
+      id: check_changes_account_layer2
+      run: |
+        . ./bin/check_changes.sh account layer2
+        echo "$CHANGED"
+        echo "ACCOUNT_LAYER2=$CHANGED" >> $GITHUB_OUTPUT
+      shell: bash
+    outputs:
+      ACCOUNT_LAYER1: "${{ steps.check_changes_account_layer1.outputs.ACCOUNT_LAYER1}}"
+      ACCOUNT_LAYER2: "${{ steps.check_changes_account_layer2.outputs.ACCOUNT_LAYER2}}"
+
+  account_layer1:
+    if: needs.check_changes.outputs.ACCOUNT_LAYER1 == 'true'
+    runs-on: ubuntu-latest
+    name: account_layer1
+    needs:
+    - check_changes
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    - name: Set branch name
+      uses: nelonoel/branch-name@v1.0.1
+    - name: Set up tfswitch
+      run: |
+        curl -L https://raw.githubusercontent.com/warrensbox/terraform-switcher/release/install.sh | sudo bash
+        tfswitch $TF_VERSION
+    - name: account_layer1
+      run: ./bin/deploy.sh account layer1
+      shell: bash
+
+  account_layer2:
+    if: needs.check_changes.outputs.ACCOUNT_LAYER2 == 'true'
+    runs-on: ubuntu-latest
+    name: account_layer2
+    needs:
+    - check_changes
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    - name: Set branch name
+      uses: nelonoel/branch-name@v1.0.1
+    - name: Set up tfswitch
+      run: | 
+        curl -L https://raw.githubusercontent.com/warrensbox/terraform-switcher/release/install.sh | sudo bash
+        tfswitch $TF_VERSION
+    - name: account_layer2
+      run: ./bin/deploy.sh account layer2
+      shell: bash

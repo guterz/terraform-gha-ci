@@ -1,0 +1,61 @@
+name: Terraform - CI
+'on': push
+env:
+  TF_VERSION: 1.3.8
+  AWS_DEFAULT_REGION: us-west-2
+  AWS_ACCESS_KEY_ID: "${{ secrets.AWS_ACCESS_KEY_ID }}"
+  AWS_SECRET_ACCESS_KEY: "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+  PREV_SHA: "${{ github.event.before }}"
+  SHA: "${{ github.sha }}"
+  GIT_SSH_COMMAND: "echo '${{ secrets.SSH_KEY }}' > id_rsa && ssh-keyscan github.com > known_hosts && chmod 600 id_rsa known_hosts && ssh -i ./id_rsa -o UserKnownHostsFile=./known_hosts"
+
+jobs:
+  check_changes:
+    name: Check Changes
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set branch name # Look for updated action to get branch name and set as env variable or just add a step and bash commands to do the same
+        uses: nelonoel/branch-name@v1.0.1
+      - name: Prepare matrix
+        id: set-matrix
+        run: |
+          ACCOUNTS=('layer1' 'layer2')
+          JSON_STRING='['
+          for ACCOUNT in "${ACCOUNTS[@]}"; do
+            . ./bin/check_changes.sh account "$ACCOUNT"
+            if [[ "$CHANGED" == "true" ]]; then
+              JSON_STRING+='{"account":"'${ACCOUNT}'"},'
+            fi
+          done
+          JSON_STRING+=']'
+          JSON_STRING="${JSON_STRING/[,]/}" # Removes the last comma
+          echo "matrix=${JSON_STRING}" >> $GITHUB_ENV
+          echo "::set-output name=matrix::${JSON_STRING}"
+
+  deploy:
+    needs: [check_changes]
+    runs-on: ubuntu-latest
+    name: Deploy Terraform
+    strategy:
+      matrix: ${{fromJson(needs.check_changes.outputs.matrix)}}
+      fail-fast: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Set branch name
+        uses: nelonoel/branch-name@v1.0.1
+      - name: Set up tfswitch
+        run: |
+          curl -L https://raw.githubusercontent.com/warrensbox/terraform-switcher/release/install.sh | sudo bash
+          tfswitch $TF_VERSION
+      - name: Deploy
+        run: ./bin/deploy.sh account ${{ matrix.account }}
+        shell: bash

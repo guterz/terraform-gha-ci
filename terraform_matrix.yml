@@ -1,13 +1,10 @@
 name: Terraform - CI
-'on': push
+
+on: push
+
 env:
-  TF_VERSION: 1.3.8
-  AWS_DEFAULT_REGION: us-west-2
-  AWS_ACCESS_KEY_ID: "${{ secrets.AWS_ACCESS_KEY_ID }}"
-  AWS_SECRET_ACCESS_KEY: "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
   PREV_SHA: "${{ github.event.before }}"
   SHA: "${{ github.sha }}"
-  GIT_SSH_COMMAND: "echo '${{ secrets.SSH_KEY }}' > id_rsa && ssh-keyscan github.com > known_hosts && chmod 600 id_rsa known_hosts && ssh -i ./id_rsa -o UserKnownHostsFile=./known_hosts"
 
 jobs:
   check_changes:
@@ -15,47 +12,69 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      should_deploy: ${{ steps.check-deployment.outputs.should_deploy }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Set branch name # Look for updated action to get branch name and set as env variable or just add a step and bash commands to do the same
+      - name: Set branch name
         uses: nelonoel/branch-name@v1.0.1
       - name: Prepare matrix
         id: set-matrix
         run: |
-          ACCOUNTS=('layer1' 'layer2')
+          ACCOUNTS=('acct1' 'acct2' 'acct3')
+          REGIONS=('us-west-2' 'us-east-2')
           JSON_STRING='['
           for ACCOUNT in "${ACCOUNTS[@]}"; do
-            . ./bin/check_changes.sh account "$ACCOUNT"
-            if [[ "$CHANGED" == "true" ]]; then
-              JSON_STRING+='{"account":"'${ACCOUNT}'"},'
-            fi
+            for REGION in "${REGIONS[@]}"; do
+              . ./bin/check_changes.sh "$ACCOUNT" "$REGION"
+              if [[ "$CHANGED" == "true" ]]; then
+                for LAYER in $LAYERS; do
+                  JSON_STRING+='{"account":"'${ACCOUNT}'", "region": "'${REGION}'", "layer": "'${LAYER}'"},'
+                done
+              fi
+            done
           done
           JSON_STRING+=']'
-          JSON_STRING="${JSON_STRING/[,]/}" # Removes the last comma
-          echo "matrix=${JSON_STRING}" >> $GITHUB_ENV
-          echo "::set-output name=matrix::${JSON_STRING}"
+          JSON_STRING=$(echo "$JSON_STRING" | sed 's/,\]/]/') # Removes the last comma
+          echo "matrix=${JSON_STRING}" >> $GITHUB_OUTPUT
+      - name: Check if deployment is necessary
+        id: check-deployment
+        run: |
+          if [[ "${{ steps.set-matrix.outputs.matrix }}" == "[]" ]]; then
+            echo "should_deploy=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+          fi
 
   deploy:
     needs: [check_changes]
+    if: needs.check_changes.outputs.should_deploy == 'true'
     runs-on: ubuntu-latest
     name: Deploy Terraform
+    permissions:
+      id-token: write
+      contents: read
     strategy:
-      matrix: ${{fromJson(needs.check_changes.outputs.matrix)}}
-      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.check_changes.outputs.matrix) }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Set branch name
         uses: nelonoel/branch-name@v1.0.1
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          audience: sts.amazonaws.com
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          role-session-name: GitHubToAWS
+          aws-region: ${{ matrix.region }}
       - name: Set up tfswitch
         run: |
           curl -L https://raw.githubusercontent.com/warrensbox/terraform-switcher/release/install.sh | sudo bash
-          tfswitch $TF_VERSION
       - name: Deploy
-        run: ./bin/deploy.sh account ${{ matrix.account }}
-        shell: bash
+        run: . ./bin/deploy.sh ${{ matrix.account }} ${{ matrix.region }} ${{ matrix.layer }}
